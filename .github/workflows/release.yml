@@ -96,7 +96,6 @@ jobs:
               '',
               '## 安装包',
               `- Chrome / Edge: \`yb-digest-${version}.zip\``,
-              `- 源码: \`yb-digest-${version}-source.zip\``,
             ].join('\n');
 
             const updated = await github.rest.repos.updateRelease({
@@ -115,11 +114,7 @@ jobs:
             core.setOutput('tag_name', tagName);
             core.setOutput('version', version);
 
-            // 只保留当前版本的安装包和源码包，避免草稿 Release 混入旧版本资产。
-            const expectedAssets = new Set([
-              `yb-digest-${version}.zip`,
-              `yb-digest-${version}-source.zip`,
-            ]);
+            // 只保留当前版本的包，避免草稿 Release 混入旧版本资产。
             const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
               owner,
               repo,
@@ -127,7 +122,7 @@ jobs:
               per_page: 100,
             });
             for (const asset of assets) {
-              if (/^yb-digest-.*\.zip$/.test(asset.name) && !expectedAssets.has(asset.name)) {
+              if (/^yb-digest-.*\.zip$/.test(asset.name) && asset.name !== `yb-digest-${version}.zip`) {
                 await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: asset.id });
                 core.info(`Deleted stale asset ${asset.name}`);
               }
@@ -150,30 +145,16 @@ jobs:
       - name: Package extension
         run: npm run package
 
-      - name: Archive source code
-        env:
-          SOURCE_PATH: dist/yb-digest-${{ needs.prepare-release.outputs.version }}-source.zip
-        run: |
-          git archive \
-            --format=zip \
-            --prefix="yb-digest-${{ needs.prepare-release.outputs.version }}/" \
-            --output="$SOURCE_PATH" \
-            "$GITHUB_SHA"
-
       - name: Verify package
         env:
           PACKAGE_PATH: dist/yb-digest-${{ needs.prepare-release.outputs.version }}.zip
-          SOURCE_PATH: dist/yb-digest-${{ needs.prepare-release.outputs.version }}-source.zip
         run: |
           test -f "$PACKAGE_PATH"
           unzip -t "$PACKAGE_PATH"
-          test -f "$SOURCE_PATH"
-          unzip -t "$SOURCE_PATH"
 
-      - name: Upload assets to draft release
+      - name: Upload package to draft release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
           PACKAGE_PATH: dist/yb-digest-${{ needs.prepare-release.outputs.version }}.zip
-          SOURCE_PATH: dist/yb-digest-${{ needs.prepare-release.outputs.version }}-source.zip
-        run: gh release upload "$TAG_NAME" "$PACKAGE_PATH" "$SOURCE_PATH" --clobber
+        run: gh release upload "$TAG_NAME" "$PACKAGE_PATH" --clobber
