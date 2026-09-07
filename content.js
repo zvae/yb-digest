@@ -1,0 +1,460 @@
+/**
+ * Bilibili Digest — content script（B 站播放页）：注入 Digest / 笔记按钮，
+ * n 快捷键记笔记，响应侧边栏的播放器指令。
+ *
+ * 工具栏选择器是一组候选，全部落空时退化成播放器上的浮动按钮。
+ * 贯穿全文件的一条纪律：**页面稳定之前不碰 DOM**，原因见 SETTLE_DELAY_MS。
+ */
+
+(() => {
+  "use strict";
+
+  const DEBUG = false;
+  const debugLog = (...args) => {
+    if (DEBUG) console.log("[Bilibili Digest]", ...args);
+  };
+
+  const OVERLAY_ID = "bili-digest-overlay";
+  const DIGEST_BUTTON_ID = "bili-digest-button";
+  const NOTE_BUTTON_ID = "bili-digest-note-button";
+  const NOTE_LABEL_CLASS = "bili-digest-note-label";
+
+  // 从左到右依次尝试，命中即用。覆盖新旧两版播放页。
+  const TOOLBAR_SELECTORS = [
+    "ytd-watch-metadata #top-level-buttons-computed",
+    "#actions-inner #top-level-buttons-computed",
+    ".video-toolbar-left",
+    ".video-toolbar-container .toolbar-left",
+    "#arc_toolbar_report .toolbar-left",
+    ".toolbar-left",
+    ".video-toolbar-v1 .toolbar-left",
+  ];
+  // 浮动按钮挂在哪一层。硬约束：不能挂进直接包着 <video> 的那层——那层归
+  // B 站播放器自己管，插外来节点会让它推倒重建，视频加载两遍。
+  const PLAYER_SELECTORS = [
+    "#movie_player",
+    "ytd-reel-video-renderer[is-active] #player-container",
+    "#bilibili-player .bpx-player-primary-area",
+    "#bilibili-player",
+    ".bpx-player-container",
+    "#playerWrap",
+  ];
+
+  // 按钮自查的间隔。B 站重渲染后要靠它把按钮补回去。
+  const REINJECT_INTERVAL_MS = 800;
+
+  /**
+   * 等页面稳定下来再动 DOM。B 站播放页是 SSR + Vue hydration：hydration 跑完
+   * 之前往它管的容器插节点，Vue 会判定两端对不上、把整棵树推倒重渲染，
+   * 表现为视频加载两遍。没有公开的「hydration 完成」信号，用三个条件近似：
+   * window.load 已发生、<video> 已挂上、再留一点余量。
+   */
+  const SETTLE_DELAY_MS = 1200;
+  const PLAYER_POLL_MS = 200;
+  const PLAYER_WAIT_TIMEOUT_MS = 15000;
+
+  // ============================================================
+  // 页面读取
+  // ============================================================
+
+  // 播放页是 /video/BVxxx，合集播放页把 BV 号放在 ?bvid= 里，所以整个 URL 都要看。
+  const currentBvid = () => YB_VIDEO.parseUrl(location.href)?.key || null;
+
+  const currentPage = () => {
+    return YB_VIDEO.parseUrl(location.href)?.page || 1;
+  };
+  const dialog = YB_DIALOG.create({ document, runtime: chrome.runtime,
+    videoKey: () => currentBvid() ? `${currentBvid()}:p${currentPage()}` : null });
+
+  const firstMatch = (selectors) => {
+    for (const selector of selectors) {
+      const element = document.querySelector(selector);
+      if (element) return element;
+    }
+    return null;
+  };
+
+  const holdsVideoDirectly = (element) =>
+    Array.prototype.some.call(
+      element.children || [],
+      (child) => child.tagName === "VIDEO",
+    );
+
+  // 外层容器，且不是 <video> 的直接父节点，才能安全挂东西。
+  function playerContainer() {
+    for (const selector of PLAYER_SELECTORS) {
+      const element = document.querySelector(selector);
+      if (element && !holdsVideoDirectly(element)) return element;
+    }
+    return null;
+  }
+
+  const videoElement = () =>
+    document.querySelector("ytd-reel-video-renderer[is-active] video") ||
+    document.querySelector(".bpx-player-video-wrap video") ||
+    document.querySelector("video");
+
+  function readVideoInfo() {
+    const titleNode =
+      document.querySelector("ytd-watch-metadata h1 yt-formatted-string") ||
+      document.querySelector("h1.video-title") ||
+      document.querySelector(".video-title") ||
+      document.querySelector("h1[title]");
+    const ownerNode =
+      document.querySelector("ytd-watch-metadata #owner #channel-name a") ||
+      document.querySelector(".up-info-container .up-name") ||
+      document.querySelector("a.up-name") ||
+      document.querySelector(".up-name");
+    const video = videoElement();
+
+    return {
+      bvid: currentBvid(),
+      platform: YB_VIDEO.parseUrl(location.href)?.platform || null,
+      page: currentPage(),
+      // B 站标题带 "_哔哩哔哩_bilibili" 后缀，DOM 拿不到时才退回它。
+      title:
+        titleNode?.getAttribute("title")?.trim() ||
+        titleNode?.textContent?.trim() ||
+        document.title.replace(/_哔哩哔哩.*$| - YouTube$/, "").trim(),
+      owner: ownerNode?.textContent?.trim() || "",
+      duration: Number(video?.duration) || 0,
+      currentTime: Number(video?.currentTime) || 0,
+    };
+  }
+
+  // ============================================================
+  // 按钮
+  // ============================================================
+
+  const BUTTON_BASE = `display:inline-flex;align-items:center;gap:6px;
+     padding:6px 14px;border:none;border-radius:6px;cursor:pointer;
+     font-size:13px;line-height:1.4;color:#fff;white-space:nowrap;`;
+
+  const SVG_NS = "http://www.w3.org/2000/svg";
+
+  // 便签 + 笔。跟侧边栏笔记页用的是同一个图形（sidepanel.html 的雪碧图 #i-note）。
+  const NOTE_ICON_PATHS = [
+    "M8.6 2.4H4.1c-.6 0-1.1.5-1.1 1.1v8.9c0 .6.5 1.1 1.1 1.1h6.2c.6 0 1.1-.5 1.1-1.1V7.9",
+    "M11.2 2.2a1.4 1.4 0 0 1 2 2L9.1 8.3l-2.5.5.5-2.5Z",
+  ];
+
+  // 逐个节点建 SVG 而非 innerHTML：B 站若启用 Trusted Types，innerHTML 会被拦掉。
+  function noteIcon() {
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("width", "14");
+    svg.setAttribute("height", "14");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "1.5");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    for (const d of NOTE_ICON_PATHS) {
+      const path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("d", d);
+      svg.appendChild(path);
+    }
+    return svg;
+  }
+
+  // 主题色跟随设置页的色板：accentFill 是 RGB 分量串，供实心与半透明两种
+  // 底色复用。色值取 ACCENT_THEMES[].swatch（浅色填充档），与 theme.css 的
+  // 浅色 --accent 同源——按钮落在浅色的 B 站页面上，不跟面板的明暗模式走。
+  let accentFill = "251,114,153";
+  const themedButtons = new Set();
+
+  function accentRgb(swatch) {
+    const value = Number.parseInt(swatch.slice(1), 16);
+    return `${(value >> 16) & 255},${(value >> 8) & 255},${value & 255}`;
+  }
+
+  function paintButton({ button, floating, neutral }) {
+    // neutral：播放器上的笔记按钮刻意保持中性深色，不随主题变。
+    const background = neutral
+      ? "rgba(0,0,0,.55)"
+      : floating
+        ? `rgba(${accentFill},.92)`
+        : `rgb(${accentFill})`;
+    button.style.cssText = floating
+      ? `${BUTTON_BASE}background:${background};box-shadow:0 2px 8px rgba(0,0,0,.2);`
+      : `${BUTTON_BASE}background:${background};margin-left:12px;`;
+  }
+
+  function styleButton(button, { floating, neutral = false }) {
+    const record = { button, floating, neutral };
+    themedButtons.add(record);
+    paintButton(record);
+  }
+
+  function applyAccentTheme(accentTheme) {
+    const theme =
+      BILI_SETTINGS.ACCENT_THEMES[
+        BILI_SETTINGS.normalize({ accentTheme }).accentTheme
+      ];
+    accentFill = accentRgb(theme.swatch);
+    for (const record of themedButtons) paintButton(record);
+  }
+
+  // chrome.storage 被 background 的 setAccessLevel(TRUSTED_CONTEXTS) 挡在
+  // 内容脚本之外（读它会抛 "Access to storage is not allowed"），主题色
+  // 只能由 background 代读、经消息通道下发；设置变更也由它广播过来。
+  function watchAccentTheme() {
+    chrome.runtime.onMessage.addListener((message) => {
+      if (message?.action === "appearanceChanged") {
+        applyAccentTheme(message.accentTheme);
+      }
+    });
+    chrome.runtime
+      .sendMessage({ action: "getAppearance" })
+      .then((reply) => {
+        if (reply?.success) applyAccentTheme(reply.accentTheme);
+      })
+      .catch(() => {
+        /* 主题色不可用时保持品牌粉，按钮功能不受影响 */
+      });
+  }
+
+  // 浮动按钮共用一个纵向容器，否则 Digest 退化成浮动按钮时会和笔记按钮叠在一起。
+  function ensureOverlay() {
+    const player = playerContainer();
+    if (!player) return null;
+
+    let overlay = player.querySelector(`#${OVERLAY_ID}`);
+    if (overlay?.isConnected) return overlay;
+
+    // 浮动定位需要一个定位上下文，播放器容器默认可能是 static。
+    if (getComputedStyle(player).position === "static") {
+      player.style.position = "relative";
+    }
+    overlay = document.createElement("div");
+    overlay.id = OVERLAY_ID;
+    overlay.style.cssText = `position:absolute;top:12px;right:12px;z-index:9999;
+       display:flex;flex-direction:column;align-items:flex-end;gap:8px;`;
+    player.appendChild(overlay);
+    return overlay;
+  }
+
+  function injectDigestButton() {
+    const existing = document.getElementById(DIGEST_BUTTON_ID);
+    if (existing?.isConnected) return;
+
+    const button = document.createElement("button");
+    button.id = DIGEST_BUTTON_ID;
+    button.type = "button";
+    button.textContent = "Digest";
+    button.title = "打开 YB Digest 弹窗";
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      dialog.open();
+    });
+
+    const toolbar = firstMatch(TOOLBAR_SELECTORS);
+    if (toolbar) {
+      styleButton(button, { floating: false });
+      toolbar.appendChild(button);
+      debugLog("Digest 按钮已注入工具栏");
+      return;
+    }
+
+    const overlay = ensureOverlay();
+    if (overlay) {
+      styleButton(button, { floating: true });
+      overlay.appendChild(button);
+      debugLog("工具栏未命中，Digest 按钮退化为浮动按钮");
+    }
+  }
+
+  function injectNoteButton() {
+    const existing = document.getElementById(NOTE_BUTTON_ID);
+    if (existing?.isConnected) return;
+
+    const overlay = ensureOverlay();
+    if (!overlay) return;
+
+    const button = document.createElement("button");
+    button.id = NOTE_BUTTON_ID;
+    button.type = "button";
+    button.title = "在当前时间点记一条笔记（快捷键 n）";
+    // 文案单独放一个 span：保存反馈只换这里的字，图标留在原处。
+    const label = document.createElement("span");
+    label.className = NOTE_LABEL_CLASS;
+    label.textContent = "笔记";
+    button.append(noteIcon(), label);
+    styleButton(button, { floating: true, neutral: true });
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      saveNoteAtCurrentTime();
+    });
+    overlay.appendChild(button);
+  }
+
+  function injectButtons() {
+    dialog.sync();
+    if (!currentBvid()) {
+      document.getElementById(DIGEST_BUTTON_ID)?.remove();
+      document.getElementById(OVERLAY_ID)?.remove();
+      themedButtons.clear();
+      return;
+    }
+    for (const record of themedButtons) {
+      if (!record.button.isConnected) themedButtons.delete(record);
+    }
+    injectDigestButton();
+    injectNoteButton();
+  }
+
+  // ============================================================
+  // 记笔记
+  // ============================================================
+
+  let noteInFlight = false;
+
+  function flashNoteButton(text) {
+    const button = document.getElementById(NOTE_BUTTON_ID);
+    const label = button?.querySelector(`.${NOTE_LABEL_CLASS}`);
+    if (!label) return;
+    label.textContent = text;
+    setTimeout(() => {
+      if (button.isConnected) label.textContent = "笔记";
+    }, 1800);
+  }
+
+  async function saveNoteAtCurrentTime() {
+    const video = videoElement();
+    const bvid = currentBvid();
+    if (!video || !bvid || noteInFlight) return;
+
+    // 连点几下不该存出几条一样的笔记，在途时忽略而不是排队。
+    noteInFlight = true;
+    flashNoteButton("保存中…");
+    try {
+      const result = await chrome.runtime.sendMessage({
+        action: "saveNote",
+        bvid,
+        page: currentPage(),
+        timestamp: Math.floor(video.currentTime || 0),
+      });
+      if (result?.success) {
+        // 去重命中时数据并没有存进去，如实说，别假装保存成功。
+        flashNoteButton(result.duplicate ? "该时刻已有笔记" : "已保存");
+      } else if (result?.error === "STORAGE_FULL") {
+        const button = document.getElementById(NOTE_BUTTON_ID);
+        if (button) button.title = result.message;
+        flashNoteButton("空间不足");
+      } else {
+        flashNoteButton("保存失败");
+      }
+    } catch (error) {
+      flashNoteButton("保存失败");
+    } finally {
+      noteInFlight = false;
+    }
+  }
+
+  // 用户在弹幕框或搜索框里打字时，n 是普通字符，不能抢。
+  function isTypingTarget(target) {
+    if (!target) return false;
+    const tag = target.tagName;
+    return (
+      tag === "INPUT" ||
+      tag === "TEXTAREA" ||
+      target.isContentEditable === true
+    );
+  }
+
+  function handleKeydown(event) {
+    if (event.key === "Escape") { dialog.close(); return; }
+    if (event.key !== "n" && event.key !== "N") return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (isTypingTarget(event.target)) return;
+    event.preventDefault();
+    saveNoteAtCurrentTime();
+  }
+
+  // ============================================================
+  // 消息处理
+  // ============================================================
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.action === "openDigestDialog") {
+      sendResponse({ success: dialog.open() });
+      return false;
+    }
+    if (message?.action === "closeDigestDialog") {
+      dialog.close();
+      sendResponse({ success: true });
+      return false;
+    }
+    if (message?.action === "getVideoInfo") {
+      sendResponse(readVideoInfo());
+      return false;
+    }
+
+    if (message?.action === "getPlaybackTime") {
+      const video = videoElement();
+      sendResponse({
+        currentTime: Number(video?.currentTime) || 0,
+        paused: video ? video.paused : true,
+      });
+      return false;
+    }
+
+    if (message?.action === "seekTo") {
+      const video = videoElement();
+      if (!video) {
+        sendResponse({ success: false, error: "NO_PLAYER" });
+        return false;
+      }
+      video.currentTime = Math.max(0, Number(message.seconds) || 0);
+      // 用户从侧边栏点时间戳意味着想看这一段，暂停着就顺手播起来。
+      if (video.paused) video.play().catch(() => {});
+      sendResponse({ success: true });
+      return false;
+    }
+
+    return false;
+  });
+
+  // ============================================================
+  // 启动
+  // ============================================================
+
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function whenWindowLoaded() {
+    if (document.readyState === "complete") return Promise.resolve();
+    return new Promise((resolve) =>
+      window.addEventListener("load", () => resolve(), { once: true }),
+    );
+  }
+
+  // <video> 挂上说明应用已渲染过一轮。等不到也别一直等下去。
+  async function whenPlayerMounted() {
+    const deadline = Date.now() + PLAYER_WAIT_TIMEOUT_MS;
+    while (!videoElement() && Date.now() < deadline) {
+      await delay(PLAYER_POLL_MS);
+    }
+  }
+
+  async function init() {
+    window.addEventListener("pagehide", () => dialog.close());
+    // 挂监听不碰 DOM，不会干扰 hydration，可以立刻生效。
+    document.addEventListener("keydown", handleKeydown);
+    // 主题色读取是异步的，按钮注入要等页面稳定，先后天然错开；不 await。
+    watchAccentTheme();
+
+    await whenWindowLoaded();
+    await whenPlayerMounted();
+    await delay(SETTLE_DELAY_MS);
+
+    injectButtons();
+    // 定时自查而非 MutationObserver：弹幕每飘一条都是 DOM 变更，观察 body 白烧
+    // CPU 还会让防抖永远等不到空档。定时器顺带覆盖了 SPA 换页（不触发事件）。
+    setInterval(injectButtons, REINJECT_INTERVAL_MS);
+  }
+
+  init();
+})();

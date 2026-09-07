@@ -1,0 +1,160 @@
+name: Release Draft
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-draft-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Find or create draft release
+        id: release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const manifest = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+            const version = manifest.version;
+
+            if (typeof version !== 'string' || !/^\d+(\.\d+){1,3}$/.test(version)) {
+              core.setFailed(`manifest.json contains an invalid extension version: ${version}`);
+              return;
+            }
+
+            const tagName = `v${version}`;
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner,
+              repo,
+              per_page: 100,
+            });
+            const latestPublished = releases.find((release) => !release.draft && !release.prerelease);
+            let release = releases.find((release) => release.draft);
+
+            if (!release) {
+              const created = await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: tagName,
+                target_commitish: context.sha,
+                name: `YB Digest ${tagName}`,
+                body: '正在提取更新内容并准备扩展安装包。',
+                draft: true,
+                prerelease: false,
+              });
+              release = created.data;
+              core.info(`Created draft release ${release.id} (${tagName})`);
+            } else {
+              core.info(`Using existing draft release ${release.id} (tag: ${release.tag_name})`);
+            }
+
+            let commits;
+            if (latestPublished) {
+              const comparison = await github.rest.repos.compareCommits({
+                owner,
+                repo,
+                base: latestPublished.tag_name,
+                head: context.sha,
+              });
+              commits = comparison.data.commits;
+            } else {
+              commits = await github.paginate(github.rest.repos.listCommits, {
+                owner,
+                repo,
+                sha: context.sha,
+                per_page: 100,
+              });
+            }
+
+            const changes = commits
+              .slice(0, 100)
+              .map((commit) => {
+                const title = commit.commit.message.split('\n')[0].trim();
+                return `- ${title} ([${commit.sha.slice(0, 7)}](${commit.html_url}))`;
+              })
+              .join('\n') || '- 本次提交未发现可提取的变更记录。';
+            const body = [
+              '## 更新内容',
+              changes,
+              '',
+              '## 安装包',
+              `- Chrome / Edge: \`yb-digest-${version}.zip\``,
+            ].join('\n');
+
+            const updated = await github.rest.repos.updateRelease({
+              owner,
+              repo,
+              release_id: release.id,
+              tag_name: tagName,
+              target_commitish: context.sha,
+              name: (!release.name || release.tag_name.startsWith('untagged'))
+                ? `YB Digest ${tagName}`
+                : release.name,
+              body,
+              draft: true,
+            });
+
+            core.setOutput('tag_name', tagName);
+            core.setOutput('version', version);
+
+            // 只保留当前版本的包，避免草稿 Release 混入旧版本资产。
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              owner,
+              repo,
+              release_id: updated.data.id,
+              per_page: 100,
+            });
+            for (const asset of assets) {
+              if (/^yb-digest-.*\.zip$/.test(asset.name) && asset.name !== `yb-digest-${version}.zip`) {
+                await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: asset.id });
+                core.info(`Deleted stale asset ${asset.name}`);
+              }
+            }
+
+  build-and-upload:
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Test
+        run: npm test
+
+      - name: Package extension
+        run: npm run package
+
+      - name: Verify package
+        env:
+          PACKAGE_PATH: dist/yb-digest-${{ needs.prepare-release.outputs.version }}.zip
+        run: |
+          test -f "$PACKAGE_PATH"
+          unzip -t "$PACKAGE_PATH"
+
+      - name: Upload package to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
+          PACKAGE_PATH: dist/yb-digest-${{ needs.prepare-release.outputs.version }}.zip
+        run: gh release upload "$TAG_NAME" "$PACKAGE_PATH" --clobber

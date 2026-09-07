@@ -1,0 +1,372 @@
+/* Bilibili Digest — 设置页样式。
+ * 与侧边栏共享同一套设计语言：暖纸面背景、白色卡片、药丸按钮、
+ * 同款焦点环与过渡节奏。
+ */
+
+:root {
+  /* accent 系只做填充；落到文字上一律走 --accent-text（theme.css） */
+  --accent: #fb7299;
+  --accent-strong: #f0567e;
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
+
+  --bg: #faf6f7;
+  /* 卡片与侧边栏同色族：与纸面统一的暖白，不再用刺眼的纯白 */
+  --card: #fdf8fa;
+  /* 输入框要再白一点，在暖白卡片上才有「可以填」的落差 */
+  --input: #ffffff;
+  --bg-hover: #f5eff1;
+  --text: #2b2629;
+  --text-muted: #6e6569;
+  --text-faint: #a29a9e;
+  --border: #ece4e7;
+  --border-strong: #dcd2d6;
+  --danger: #e0485a;
+  --ok: #2e9e5b;
+
+  --shadow-sm: 0 1px 3px rgba(88, 60, 72, 0.06);
+  --shadow-md: 0 8px 24px rgba(88, 60, 72, 0.10);
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  --focus-ring: 2px solid var(--accent);
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --dur: 160ms;
+}
+
+html {
+  --ui-font-zoom: 1;
+}
+
+html body {
+  zoom: var(--ui-font-zoom);
+}
+
+/* 暗色变量挂两个钩子：media query 兜 JS 写入 data-theme-mode 之前的首屏，
+   data-theme-mode 承接用户手动选择的明暗。两处列表一致，改动请同步。 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme-mode="light"]) {
+    --bg: #17181a;
+    --card: #1f2022;
+    --input: var(--bg);
+    --bg-hover: #27282b;
+    --text: #e3e5e7;
+    --text-muted: #9499a0;
+    --text-faint: #6b7076;
+    --border: #2f3134;
+    --border-strong: #3c3f43;
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+  }
+}
+
+:root[data-theme-mode="dark"] {
+  --bg: #17181a;
+  --card: #1f2022;
+  --input: var(--bg);
+  --bg-hover: #27282b;
+  --text: #e3e5e7;
+  --text-muted: #9499a0;
+  --text-faint: #6b7076;
+  --border: #2f3134;
+  --border-strong: #3c3f43;
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 40px 16px;
+  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  /* 同侧边栏：非编辑区域不画插入符，避免折叠选区残留出幽灵光标 */
+  caret-color: transparent;
+}
+
+input,
+textarea,
+[contenteditable] {
+  caret-color: auto;
+}
+
+:where(button, input, select, a):focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+button,
+input,
+select {
+  font-family: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.page {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+/* 页面标题带同款品牌方块，与侧边栏头部呼应。 */
+h1 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 24px;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+h1::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #fb7299 0%, #f0567e 100%);
+  box-shadow: 0 2px 8px rgba(251, 114, 153, 0.35);
+}
+
+.card {
+  padding: 20px 22px;
+  margin-bottom: 16px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+h2::before {
+  content: "";
+  width: 3px;
+  height: 13px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+
+.field {
+  display: block;
+  margin: 18px 0 0;
+}
+
+.field-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+input[type="password"],
+input[type="text"],
+input[type="url"],
+input[type="number"],
+select {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color var(--dur) var(--ease);
+}
+
+input:hover,
+select:hover {
+  border-color: var(--border-strong);
+}
+
+input:focus,
+select:focus {
+  border-color: var(--accent);
+}
+
+input::placeholder {
+  color: var(--text-faint);
+}
+
+.field-hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.field-hint a {
+  color: var(--accent-text);
+  text-decoration: none;
+}
+
+.field-hint a:hover {
+  text-decoration: underline;
+}
+
+.field-row {
+  display: flex;
+  gap: 8px;
+}
+
+.field-row > input,
+.model-control {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-control {
+  display: block;
+}
+
+.model-control > [hidden] {
+  display: none;
+}
+
+code {
+  padding: 1px 5px;
+  font-size: 12px;
+  background: var(--input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.note {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.primary-btn {
+  padding: 8px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 30%, transparent);
+  transition:
+    background-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+
+.primary-btn:hover {
+  background: var(--accent-strong);
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--accent) 38%, transparent);
+}
+
+.primary-btn:active {
+  transform: translateY(1px);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.ghost-btn {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition:
+    color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    background-color var(--dur) var(--ease);
+}
+
+.ghost-btn:hover {
+  color: var(--accent-text);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.ghost-btn:active {
+  background: var(--bg-hover);
+}
+
+.status {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ok);
+}
+
+.status:empty {
+  display: none;
+}
+
+/* ---------- 主题色板：一圈色点，点选即换 ---------- */
+
+.swatch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.swatch-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  /* 内圈留一圈卡片色，色点周围有呼吸感 */
+  box-shadow: inset 0 0 0 2px var(--card);
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition:
+    transform var(--dur) var(--ease),
+    border-color var(--dur) var(--ease);
+}
+
+.swatch-btn:hover {
+  transform: scale(1.1);
+}
+
+.swatch-btn.active {
+  border-color: var(--text);
+}

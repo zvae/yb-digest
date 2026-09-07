@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.zip
+*.crx
+.DS_Store
+*.log
+
+# playwright 误跑产物
+profiles/
+test-results/
+archive/

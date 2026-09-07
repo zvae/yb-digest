@@ -1,0 +1,353 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+const ROOT = path.join(__dirname, "..");
+
+function createElement(tagName = "div") {
+  const listeners = new Map();
+  const classes = new Set();
+  let text = "";
+  const element = {
+    tagName: tagName.toUpperCase(),
+    value: "",
+    hidden: false,
+    children: [],
+    focused: false,
+    href: "",
+    download: "",
+    dataset: {},
+    style: {},
+    setAttribute(name, value) {
+      if (!element.attributes) element.attributes = {};
+      element.attributes[name] = String(value);
+    },
+    getAttribute(name) {
+      return element.attributes?.[name] ?? null;
+    },
+    classList: {
+      toggle(name, force) {
+        const next = force === undefined ? !classes.has(name) : Boolean(force);
+        if (next) classes.add(name);
+        else classes.delete(name);
+        return next;
+      },
+      contains: (name) => classes.has(name),
+    },
+    appendChild(child) {
+      this.children.push(child);
+      return child;
+    },
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(listener);
+    },
+    async dispatch(type, event = {}) {
+      for (const listener of listeners.get(type) || []) await listener(event);
+    },
+    focus() {
+      this.focused = true;
+    },
+  };
+  Object.defineProperty(element, "textContent", {
+    get: () => text,
+    set(value) {
+      text = String(value);
+      if (text === "") element.children = [];
+    },
+  });
+  return element;
+}
+
+async function createContext({ requestPermission = async () => true } = {}) {
+  const elements = new Map();
+  const permissionRequests = [];
+  const sent = [];
+  const downloads = [];
+  const writes = [];
+  const byId = (id) => {
+    if (!elements.has(id)) {
+      const tag = id === "modelOptions" || id === "preset" || id === "protocol"
+        ? "select"
+        : id.endsWith("Btn")
+          ? "button"
+          : "div";
+      const element = createElement(tag);
+      if (id === "modelOptions") element.hidden = true;
+      elements.set(id, element);
+    }
+    return elements.get(id);
+  };
+
+  const settings = require("../settings.js");
+  const context = {
+    console,
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    // fetchWithTimeout 依赖 AbortController；浏览器全局，vm 里要显式给。
+    AbortController,
+    document: {
+      getElementById: byId,
+      createElement: (tag) => {
+        const node = createElement(tag);
+        if (tag === "a") {
+          node.click = () => downloads.push({ href: node.href, download: node.download });
+        }
+        return node;
+      },
+      documentElement: { dataset: {} },
+    },
+    window: { confirm: () => true },
+    Blob: class {
+      constructor(parts) {
+        this.parts = parts;
+      }
+    },
+    URL: {
+      createObjectURL: () => "blob:backup",
+      revokeObjectURL() {},
+    },
+    chrome: {
+      storage: {
+        local: {
+          get: async () => ({
+            [settings.STORAGE_KEY]: {
+              presetId: settings.CUSTOM_PRESET_ID,
+              protocol: settings.PROTOCOLS.OPENAI,
+              aiBaseUrl: "https://api.example.com/v1",
+              aiApiKey: "sk-test",
+              aiModel: "already-filled-model",
+            },
+          }),
+          set: async (data) => {
+            writes.push(data);
+          },
+        },
+      },
+      runtime: {
+        async sendMessage(message) {
+          sent.push(message);
+          if (message.action === "exportLearningBackup") {
+            return {
+              success: true,
+              backup: {
+                kind: "bilibili-digest-backup",
+                notes: [{ id: "n1", text: "笔记" }],
+                learning: [],
+              },
+            };
+          }
+          if (message.action === "importLearningBackup") {
+            return { success: true, notesAdded: 1, notesUpdated: 0 };
+          }
+          return { success: true };
+        },
+      },
+      permissions: {
+        contains: async () => true,
+        request: async (request) => {
+          permissionRequests.push(request);
+          return requestPermission(request);
+        },
+      },
+    },
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: [{ id: "model-b" }, { id: "model-a" }],
+      }),
+    }),
+    BILI_SETTINGS: settings,
+    BILI_AI_PROVIDER: require("../lib/ai-provider.js"),
+  };
+  context.globalThis = context;
+  vm.createContext(context);
+
+  const source = fs.readFileSync(path.join(ROOT, "options.js"), "utf8");
+  vm.runInContext(
+    `${source}\n;globalThis.__api = { fetchModels, clearModelOptions, exportBackup, saveSubtitleSettings, accentRow: fields.accentTheme };`,
+    context,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  return {
+    ...context.__api,
+    el: byId,
+    permissionRequests,
+    sent,
+    downloads,
+    writes,
+  };
+}
+
+test("保存远程 HTTP 配置时同步申请主机权限，保留实际地址的端口", async () => {
+  const ctx = await createContext();
+  ctx.el("aiBaseUrl").value = "http://192.168.1.10:8080/v1";
+  const saving = ctx.el("saveBtn").dispatch("click");
+  assert.equal(ctx.permissionRequests.length, 1, "申请权限前不能 await，以保留点击手势");
+  assert.equal(ctx.permissionRequests[0].origins[0], "http://192.168.1.10/*");
+  await saving;
+  assert.equal(ctx.writes.at(-1).bili_digest_settings.aiBaseUrl, "http://192.168.1.10:8080/v1");
+  assert.equal(ctx.el("status").textContent, "已保存并授权");
+});
+
+for (const button of ["saveBtn", "fetchModelsBtn", "testBtn"]) {
+  test(`${button} 遇到旧清单时给出重载提示，不保存失败的配置`, async () => {
+    const ctx = await createContext({ requestPermission: async () => {
+      throw new Error("Only permissions specified in the manifest may be requested.");
+    } });
+    ctx.el("aiBaseUrl").value = "http://api.example.com:8080/v1";
+    await ctx.el(button).dispatch("click");
+    assert.match(ctx.el("status").textContent, /重新加载 YB Digest/);
+    assert.match(ctx.el("status").textContent, /仅刷新设置页无效/);
+    assert.equal(ctx.writes.length, 0);
+  });
+}
+
+test("用户拒绝授权时保留原配置", async () => {
+  const ctx = await createContext({ requestPermission: async () => false });
+  await ctx.el("saveBtn").dispatch("click");
+  assert.equal(ctx.writes.length, 0);
+  assert.match(ctx.el("status").textContent, /未获得/);
+});
+
+test("Subtitle settings save independently without requesting AI permission", async () => {
+  const ctx = await createContext();
+  ctx.el("supadataApiKey").value = " subtitle-key ";
+  ctx.el("youtubeSourceLanguage").value = "ja";
+  await ctx.saveSubtitleSettings();
+  const saved = ctx.writes.at(-1).bili_digest_settings;
+  assert.equal(saved.supadataApiKey, "subtitle-key");
+  assert.equal(saved.youtubeSourceLanguage, "ja");
+  assert.equal(ctx.permissionRequests.length, 0);
+});
+
+test("模型列表使用原生 select，不依赖会过滤当前输入值的 datalist", () => {
+  const html = fs.readFileSync(path.join(ROOT, "options.html"), "utf8");
+  assert.doesNotMatch(html, /<datalist\b/i);
+  assert.doesNotMatch(html, /\blist=["']modelOptions["']/i);
+  assert.match(html, /<select[^>]+id=["']modelOptions["'][^>]+hidden/i);
+});
+
+test("设置页提供自动、较短、较长三档概览分块模式", () => {
+  const html = fs.readFileSync(path.join(ROOT, "options.html"), "utf8");
+  assert.match(html, /id=["']analysisChunkMode["']/);
+  for (const value of ["auto", "short", "long"]) {
+    assert.match(html, new RegExp(`value=["']${value}["']`));
+  }
+});
+
+test("设置页用数字自调界面字号，不必走保存并授权", () => {
+  const html = fs.readFileSync(path.join(ROOT, "options.html"), "utf8");
+  assert.match(html, /id=["']uiFontScale["']/);
+  assert.match(html, /type=["']number["']/);
+  assert.match(html, /min=["']80["']/);
+  assert.match(html, /max=["']160["']/);
+});
+
+test("外观组提供主题色板、明暗模式与文字浓度三项设置", () => {
+  const html = fs.readFileSync(path.join(ROOT, "options.html"), "utf8");
+  assert.match(html, /<h2>外观<\/h2>/);
+  assert.match(html, /id=["']accentTheme["']/);
+  assert.match(html, /id=["']themeMode["']/);
+  for (const value of ["system", "light", "dark"]) {
+    assert.match(html, new RegExp(`value=["']${value}["']`));
+  }
+  assert.match(html, /id=["']textDensity["']/);
+  for (const value of ["clear", "soft", "high"]) {
+    assert.match(html, new RegExp(`value=["']${value}["']`));
+  }
+  // 两个页面都得挂上外观变量层，色板与浓度才会生效。
+  for (const page of ["sidepanel.html", "options.html"]) {
+    const source = fs.readFileSync(path.join(ROOT, page), "utf8");
+    assert.match(source, /<link[^>]+href=["']theme\.css["']/, `${page} 缺 theme.css`);
+  }
+});
+
+test("设置页允许调整相邻分块重复的上下文字符数", () => {
+  const html = fs.readFileSync(path.join(ROOT, "options.html"), "utf8");
+  assert.match(html, /id=["']analysisOverlapChars["']/);
+  assert.match(html, /分块重叠字符数/);
+});
+
+test("theme.css 为每套非默认色板配齐明暗两套文字安全色", () => {
+  const settings = require("../settings.js");
+  const css = fs.readFileSync(path.join(ROOT, "theme.css"), "utf8");
+  for (const id of Object.keys(settings.ACCENT_THEMES)) {
+    if (id === "pink") continue; // 默认色板就在 :root 基底里，不需要覆盖块
+    assert.match(css, new RegExp(`\\[data-accent-theme=["']${id}["']\\]`), id);
+    assert.match(
+      css,
+      new RegExp(`\\[data-theme-mode=["']dark\\"]\\[data-accent-theme=["']${id}["']\\]`),
+      id,
+    );
+  }
+});
+
+test("点选主题色色板即时写入存储并落到根节点", async () => {
+  const settings = require("../settings.js");
+  const ctx = await createContext();
+
+  // 载入后存储里没有外观配置，默认粉色应处于选中态
+  assert.equal(ctx.accentRow.children[0].classList.contains("active"), true);
+
+  const indigo = ctx.accentRow.children[1];
+  await indigo.dispatch("click");
+  // saveAppearance 是异步落库，等它把微任务跑完
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(indigo.classList.contains("active"), true, "点选的色板要标为选中");
+  assert.equal(
+    ctx.accentRow.children[0].classList.contains("active"),
+    false,
+    "原先选中的色板要取消",
+  );
+  const write = ctx.writes.at(-1)?.[settings.STORAGE_KEY];
+  assert.equal(write.accentTheme, "indigo");
+  // 落到根节点 data 属性的一步由 settings.test.js 验证：这里 BILI_SETTINGS
+  // 是 node 侧模块，拿不到 vm 桩里的 document，断言不到 dataset。
+});
+
+test("拉取后在原位置用下拉框替换输入框，不显示两套重复控件", async () => {
+  const ctx = await createContext();
+
+  await ctx.el("fetchModelsBtn").dispatch("click");
+
+  const picker = ctx.el("modelOptions");
+  assert.deepEqual(
+    ctx.permissionRequests.map((request) => request.origins[0]),
+    ["https://api.example.com/*"],
+    "权限申请应直接发生在按钮点击调用栈，兼容 Chrome 与 Edge 的用户手势要求",
+  );
+  assert.equal(picker.hidden, false);
+  assert.equal(ctx.el("aiModel").hidden, true);
+  assert.deepEqual(
+    picker.children.map((option) => option.value),
+    ["already-filled-model", "model-a", "model-b", ""],
+  );
+  assert.equal(ctx.el("aiModel").value, "already-filled-model");
+
+  picker.value = "model-b";
+  await picker.dispatch("change");
+  assert.equal(ctx.el("aiModel").value, "model-b");
+
+  picker.value = "";
+  await picker.dispatch("change");
+  assert.equal(picker.hidden, true);
+  assert.equal(ctx.el("aiModel").hidden, false);
+  assert.equal(ctx.el("aiModel").focused, true);
+});
+
+test("设置页可以导出学习资料备份，且不含密钥", async () => {
+  const html = fs.readFileSync(path.join(ROOT, "options.html"), "utf8");
+  assert.match(html, /id=["']backupExportBtn["']/);
+  assert.match(html, /恢复备份/);
+
+  const ctx = await createContext();
+  await ctx.exportBackup();
+  assert.equal(ctx.sent[0].action, "exportLearningBackup");
+  assert.equal(ctx.downloads[0].download, "yb-digest-backup.json");
+  assert.match(ctx.el("backupStatus").textContent, /1 条笔记/);
+});
