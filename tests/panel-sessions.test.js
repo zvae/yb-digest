@@ -81,3 +81,14 @@ test("panel client rejects missing worker and handshake timeout", async () => {
   await assert.rejects(CLIENT.connect({ runtime: { connect: () => timeout }, timeoutMs: 5 }), /连接|超时/);
   assert.equal(timeout.disconnected, true);
 });
+
+test("panel client converts invalidated-context throw into a friendly rejection", async () => {
+  const invalidated = CLIENT.connect({
+    runtime: { connect: () => { throw new Error("Extension context invalidated."); } },
+  });
+  await assert.rejects(invalidated, /扩展已更新或重新加载/);
+  const other = CLIENT.connect({
+    runtime: { connect: () => { throw new Error("boom"); } },
+  });
+  await assert.rejects(other, /无法建立弹窗连接：boom/);
+});

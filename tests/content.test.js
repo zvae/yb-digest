@@ -49,6 +49,9 @@ function createDom() {
       },
       attachShadow() { this.shadowRoot = makeElement(); return this.shadowRoot; },
       focus() {},
+      setPointerCapture() {},
+      getBoundingClientRect() { return { left: 0, top: 0, width: 560, height: 780 }; },
+      removeEventListener() {},
       remove() {
         this.isConnected = false;
         if (this.id) byId.delete(this.id);
@@ -81,11 +84,15 @@ function createDom() {
     documentElement: makeElement("html"),
     readyState: "complete",
     title: "测试视频_哔哩哔哩_bilibili",
+    listeners: {},
+    addEventListener(type, handler) {
+      (this.listeners[type] ||= []).push(handler);
+    },
+    removeEventListener() {},
     createElement: (tag) => makeElement(tag),
     createElementNS: (namespace, tag) => makeElement(tag),
     getElementById: (id) => byId.get(id) || null,
     querySelector: (selector) => bySelector.get(selector) || null,
-    addEventListener() {},
   };
 
   // 播放器已挂上 <video> 是脚本判断「页面稳定了」的条件之一，默认给上。
@@ -429,6 +436,68 @@ test("弹窗可以关闭并再次打开", async () => {
   assert.equal(host.isConnected, false);
   click(button);
   assert.notEqual(dom.document.getElementById("yb-digest-dialog"), host);
+});
+
+test("弹窗挂了标题栏拖动和右下角缩放", async () => {
+  const dom = createDom();
+  const toolbar = dom.register(".video-toolbar-left");
+  dom.register("#bilibili-player");
+
+  await run({ dom });
+
+  const button = toolbar.children.find((child) => child.id === DIGEST_ID);
+  click(button);
+  await settle();
+
+  const host = dom.document.getElementById("yb-digest-dialog");
+  const win = host.shadowRoot.children[1];
+  const header = win.children[0];
+  const grip = win.children.find((child) => child.className === "grip");
+  assert.ok(grip, "缺少右下角缩放手柄");
+  assert.ok(header.listeners.pointerdown?.length, "标题栏没有挂拖动监听");
+  assert.ok(grip.listeners.pointerdown?.length, "手柄没有挂缩放监听");
+});
+
+test("手势在任何结束方式下都必须恢复 iframe 可点击", async () => {
+  const dom = createDom();
+  const toolbar = dom.register(".video-toolbar-left");
+  dom.register("#bilibili-player");
+
+  await run({ dom });
+
+  const button = toolbar.children.find((child) => child.id === DIGEST_ID);
+  click(button);
+  await settle();
+
+  const host = dom.document.getElementById("yb-digest-dialog");
+  const win = host.shadowRoot.children[1];
+  const iframe = win.children.find((child) => child.tagName === "IFRAME");
+  const grip = win.children.find((child) => child.className === "grip");
+  const down = { button: 0, pointerId: 7, preventDefault() {} };
+  const fire = (element, type, event = {}) => {
+    for (const handler of element.listeners[type] || []) handler(event);
+  };
+
+  // 正常结束：pointerup。
+  fire(grip, "pointerdown", down);
+  assert.equal(iframe.style.pointerEvents, "none", "手势期间 iframe 应屏蔽指针事件");
+  fire(grip, "pointerup");
+  assert.equal(iframe.style.pointerEvents, "", "pointerup 后 iframe 未恢复");
+
+  // 异常结束一：在窗口外松开，只有捕获被释放，没有 pointerup。
+  fire(grip, "pointerdown", down);
+  fire(grip, "lostpointercapture");
+  assert.equal(iframe.style.pointerEvents, "", "丢失捕获后 iframe 未恢复，窗口会点不动");
+
+  // 异常结束二：capture 没生效，pointerup 落在 document 上。
+  fire(grip, "pointerdown", down);
+  fire(dom.document, "pointerup");
+  assert.equal(iframe.style.pointerEvents, "", "document 级 pointerup 兜底没有生效");
+
+  // 异常结束三：什么结束信号都没有，下一次任意 pointerdown 必须自愈。
+  fire(grip, "pointerdown", down);
+  fire(dom.document, "pointerdown");
+  assert.equal(iframe.style.pointerEvents, "", "下一次点击没有清掉卡住的手势");
 });
 
 test("不是播放页时什么都不注入", async () => {
