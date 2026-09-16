@@ -1,6 +1,6 @@
 {
   "name": "yb-digest",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "YouTube and Bilibili transcripts, bilingual subtitles, AI overviews, Q&A, and timestamped notes in one browser extension.",
   "license": "MIT",
