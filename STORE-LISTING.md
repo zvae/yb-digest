@@ -2,7 +2,7 @@
 
 Unified Chrome / Edge MV3 extension, version 0.6.0.
 
-Package: `dist/yb-digest-0.6.0.zip` (`npm run package`).
+Package: `dist/yb-digest-0.6.1.zip` (`npm run package`).
 
 Supports YouTube native captions via Supadata and Bilibili official subtitles,
 shared bilingual reading, full-video summaries, AI overviews, video Q&A and timestamped notes
